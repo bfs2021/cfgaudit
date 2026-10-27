@@ -19,10 +19,6 @@ func init() { All = append(All, CFG080) }
 
 func (r *cfg080) ID() string { return "CFG080" }
 
-// htmlCommentRe captures the body of an HTML comment, including multi-line ones
-// (the (?s) flag lets `.` span newlines). Submatch 1 is the comment text.
-var htmlCommentRe = regexp.MustCompile(`(?s)<!--(.*?)-->`)
-
 // mdCommentRe captures the title of a Markdown link reference definition whose
 // destination is "#" or "<>", the idiom `[//]: # (text)` that Markdown writers
 // use as a comment (#621). A link reference definition does not render
@@ -39,13 +35,58 @@ type commentSpan struct {
 	kind  string
 }
 
+// htmlCommentSpans returns every HTML comment in content, ending each one the
+// way the HTML tokenizer does: at "-->" or "--!>", at the abrupt empty closings
+// "<!-->" and "<!--->", or at end of file when the comment is never closed. A
+// comment that is never closed hides everything after the marker (#971), so it
+// runs to the end of content.
+func htmlCommentSpans(content string) []commentSpan {
+	var out []commentSpan
+	for offset := 0; ; {
+		i := strings.Index(content[offset:], "<!--")
+		if i < 0 {
+			return out
+		}
+		start := offset + i
+		body, next := htmlCommentBody(content, start+len("<!--"))
+		out = append(out, commentSpan{body: body, start: start, kind: "an HTML comment (<!-- … -->"})
+		if next >= len(content) {
+			return out
+		}
+		offset = next
+	}
+}
+
+// htmlCommentBody returns the body of the comment whose text starts at
+// bodyStart, and the offset just past its closing delimiter. An unclosed
+// comment returns the rest of content and next == len(content).
+func htmlCommentBody(content string, bodyStart int) (string, int) {
+	rest := content[bodyStart:]
+	// "<!-->" and "<!--->" are complete empty comments, not an opener followed
+	// by visible text (HTML tokenizer: abrupt-closing-of-empty-comment).
+	if strings.HasPrefix(rest, ">") {
+		return "", bodyStart + 1
+	}
+	if strings.HasPrefix(rest, "->") {
+		return "", bodyStart + 2
+	}
+	end, term := -1, 0
+	if i := strings.Index(rest, "-->"); i >= 0 {
+		end, term = i, len("-->")
+	}
+	if i := strings.Index(rest, "--!>"); i >= 0 && (end < 0 || i < end) {
+		end, term = i, len("--!>")
+	}
+	if end < 0 {
+		return rest, len(content)
+	}
+	return rest[:end], bodyStart + end + term
+}
+
 // commentSpans returns every HTML comment and Markdown link-reference comment
 // in content.
 func commentSpans(content string) []commentSpan {
-	var out []commentSpan
-	for _, loc := range htmlCommentRe.FindAllStringSubmatchIndex(content, -1) {
-		out = append(out, commentSpan{body: content[loc[2]:loc[3]], start: loc[0], kind: "an HTML comment (<!-- … -->"})
-	}
+	out := htmlCommentSpans(content)
 	for _, loc := range mdCommentRe.FindAllStringSubmatchIndex(content, -1) {
 		for g := 1; g <= 3; g++ {
 			if loc[2*g] >= 0 {
